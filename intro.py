@@ -1,32 +1,35 @@
-import neopixel #importing the library
+import neopixel
 import machine
 import time
-np = neopixel.NeoPixel(machine.Pin(15),2) # 0 is the Pin for neopixel and 4 is the number of lights
 
+# RoboESP32 NeoPixel data: GPIO15, 2 pixels total
+np = neopixel.NeoPixel(machine.Pin(15), 2)
 
 def func(np):
     n = np.n
 
-    # cycle
+    # cycle (one white pixel moving)
     for i in range(4 * n):
         for j in range(n):
             np[j] = (0, 0, 0)
         np[i % n] = (255, 255, 255)
         np.write()
-        time.sleep_ms(25)
+        time.sleep_ms(100)
 
-    # bounce
+    # bounce (dark pixel on blue background)
     for i in range(4 * n):
         for j in range(n):
             np[j] = (0, 0, 128)
+
         if (i // n) % 2 == 0:
             np[i % n] = (0, 0, 0)
         else:
             np[n - 1 - (i % n)] = (0, 0, 0)
+
         np.write()
         time.sleep_ms(60)
 
-    # fade in/out
+    # fade in/out (red)
     for i in range(0, 4 * 256, 8):
         for j in range(n):
             if (i // 256) % 2 == 0:
@@ -34,12 +37,14 @@ def func(np):
             else:
                 val = 255 - (i & 0xff)
             np[j] = (val, 0, 0)
+
         np.write()
+        time.sleep_ms(20)
 
     # clear
-    for i in range(n):
-        np[i] = (0, 0, 0)
+    for j in range(n):
+        np[j] = (0, 0, 0)
     np.write()
 
-func(np)
-
+while True:
+    func(np)
