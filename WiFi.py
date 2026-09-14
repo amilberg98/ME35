@@ -11,11 +11,12 @@ print(mac_readable)
 import network
 import urequests
 import time
+import secrets
  
 #setting up SSID and password 
  
-SSID = "tufts_eecs" #use tufts_eecs
-PASSWORD = "foundedin1883" #foundedin1883
+SSID = secrets.SSID
+PASSWORD = secrets.PASSWORD
 
 
 #function definition 
@@ -44,7 +45,7 @@ response.close()
 
 print(data)
 
-DATE_URL = "https://gateway.timeapi.world/timezone/America/Chicago"
+DATE_URL = "https://gateway.timeapi.world/timezone/America/NewYork"
 reply = urequests.get(DATE_URL)
-print(reply.json()['dateTime'])
+print(reply.json()['datetime'])
  
