@@ -12,6 +12,7 @@ import network
 import urequests
 import time
 import secrets
+import http.client
  
 #setting up SSID and password 
  
@@ -44,8 +45,3 @@ data = response.json()
 response.close()
 
 print(data)
-
-DATE_URL = "https://gateway.timeapi.world/timezone/America/NewYork"
-reply = urequests.get(DATE_URL)
-print(reply.json()['datetime'])
- 
