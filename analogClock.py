@@ -3,7 +3,6 @@ import urequests
 import machine
 import time
 import gc
-import neopixel
 from machine import Pin, PWM, RTC
 import secrets
 
@@ -111,6 +110,7 @@ def fetch_sunrise_sunset():
             results = data.get("results", {})
             sunrise = results.get("sunrise")
             sunset = results.get("sunset")
+            print(sunrise)
             
             if sunrise and sunset:
                 times_dict["sunrise"][0] = int(sunrise.split("T")[1][:2])
@@ -128,6 +128,26 @@ def fetch_sunrise_sunset():
     finally:
         if response is not None:
             response.close()
+
+# ----------------------------------------------------
+# COMBINED API SYNC FUNCTION
+# ----------------------------------------------------
+def sync_apis():
+    """Fetches network time and sunrise/sunset data, reconnecting WiFi if needed."""
+    wlan = network.WLAN(network.STA_IF)
+    
+    # Reconnect if WiFi dropped
+    if not wlan.isconnected():
+        print("WiFi disconnected. Reconnecting...")
+        connect_wifi(secrets.SSID, secrets.PASSWORD)
+    
+    if wlan.isconnected():
+        print("\n--- Starting Daily API Refresh ---")
+        fetch_api_time()
+        fetch_sunrise_sunset()
+        print("--- API Refresh Complete ---\n")
+    else:
+        print("Failed to sync APIs: No network connection")
 
 # ----------------------------------------------------
 # Time --> Set Servo
@@ -166,55 +186,88 @@ def setClock(hour, minute):
         
 # State variables
 state = 0  # 0 = clock, 1 = sunrise, 2 = sunset
-times_dict = {"sunrise": [None, None], "sunset": [None, None]}
-
-# NeoPixel setup: GPIO15, 2 pixels
-np = neopixel.NeoPixel(machine.Pin(15), 2)
+times_dict = {"sunrise": [6, 23], "sunset": [18, 55]}
 
 # Hardware peripherals 
 btn = Pin(35, Pin.IN)
-servo = PWM(Pin(4), freq=50, duty_u16=0)
-led = machine.Pin(2, machine.Pin.OUT) # AM/PM Light
-led.off()
-rtc = RTC()
 
+# Servo to Pin D4, 50Hz PWM, 20 ms duty cycle
+servo = PWM(Pin(4), freq=50, duty_u16=0)
+
+# Clock Light
+led1 = machine.Pin(14, machine.Pin.OUT) 
+led1.off()
+
+# Sunrise Light
+led2 = machine.Pin(16, machine.Pin.OUT) 
+led2.off()
+
+# Sunset Light
+led3 = machine.Pin(17, machine.Pin.OUT) 
+led3.off()
+
+
+# PM Light
+led = machine.Pin(25, machine.Pin.OUT) # AM/PM Light
+led.off()
+
+rtc = RTC()
 DEBOUNCE_MS = 200
 last_press = 0
 
 btn.irq(trigger=Pin.IRQ_FALLING, handler=button_handler)
 
-connect_wifi(secrets.hSSID, secrets.hPASSWORD)
-fetch_api_time()
-
-fetch_sunrise_sunset()
+# Initial sync
+sync_apis()
 
 last_state = -1
+last_minute = -1
+
+last_sync_ticks = time.ticks_ms()
+
+day_ms = 24 * 60 * 60 * 1000 # 24 hours in miliseconds
 
 while True:
+    
+    now = time.ticks_ms()
+    
+    ticks_diff = time.ticks_diff(now, last_sync_ticks)
+    
     # Read live time from internal RTC
     current_datetime = rtc.datetime()
     current_hour = current_datetime[4]
     current_minute = current_datetime[5]
+    
+    # Sync every 24 hours at midnight
+    if ((current_hour == 0 and current_minute == 0) and (ticks_diff >= day_ms)):
+        sync_apis()
+        last_sync_ticks = time.ticks_ms()
+        
 
     # Update hardware on state change OR when the clock minute advances 5 minutes
-    if state != last_state or (state == 0 and current_minute >= last_minute + 5):
-        np[1] = (0, 0, 0) # Clear second pixel
+    if state != last_state or (state == 0 and current_minute != last_minute):
         
         if state == 0:    # Live Clock
-            np[0] = (255, 0, 0)
+            led2.off()
+            led3.off()
+            led1.on()
             setClock(current_hour, current_minute)
             last_minute = current_minute
             print(f"Current Time: {current_hour}:{current_minute}")
         elif state == 1:  # Sunrise
-            np[0] = (0, 255, 0)
+            led3.off()
+            led1.off()
+            led2.on()
             setClock(times_dict["sunrise"][0], times_dict["sunrise"][1])
-            print(f"Sunrise: {times_dict["sunrise"][0]}:{times_dict["sunrise"][1]}")
+            print(f"Sunrise: {times_dict['sunrise'][0]}:{times_dict['sunrise'][1]}")
         elif state == 2:  # Sunset
-            np[0] = (0, 0, 255)
+            led2.off()
+            led1.off()
+            led3.on()
             setClock(times_dict["sunset"][0], times_dict["sunset"][1])
-            print(f"Sunset: {times_dict["sunset"][0]}:{times_dict["sunset"][1]}")
+            print(f"Sunset: {times_dict['sunset'][0]}:{times_dict['sunset'][1]}")
             
-        np.write()
+
         last_state = state
 
     time.sleep(0.1)
