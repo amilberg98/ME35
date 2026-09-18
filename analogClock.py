@@ -133,7 +133,7 @@ def fetch_sunrise_sunset():
 # COMBINED API SYNC FUNCTION
 # ----------------------------------------------------
 def sync_apis():
-    """Fetches network time and sunrise/sunset data, reconnecting WiFi if needed."""
+    #Fetches network time and sunrise/sunset data, reconnecting WiFi if needed.
     wlan = network.WLAN(network.STA_IF)
     
     # Reconnect if WiFi dropped
