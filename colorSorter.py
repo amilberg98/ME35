@@ -60,6 +60,8 @@ transition_btn = Pin(35, Pin.IN)      # external pull-up required
 
 lightsensor = ADC(Pin(25, Pin.IN))
 lightsensor.atten(ADC.ATTN_11DB)
+sensorLight = Pin(19, Pin.OUT)
+sensorLight.on()
 
 np = neopixel.NeoPixel(Pin(15), 1)
 
@@ -255,6 +257,7 @@ def handle_transition():
 
 
 def process_block():
+    sensorLight.off()
     print("\n--- Block detected ---")
     time.sleep_ms(SETTLE_MS)
     if not block_present():
@@ -289,7 +292,8 @@ def process_block():
 
     if label:
         sort_to_bin(label)
-
+        
+    sensorLight.on()
 
 # =====================================================================
 # MAIN
@@ -305,6 +309,7 @@ while True:
         handle_transition()
 
     if block_present():
+        
         process_block()
         # wait for the block to clear, still honouring the transition button
         while block_present():
