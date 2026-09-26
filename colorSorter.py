@@ -4,263 +4,312 @@ import math
 import neopixel
 import veml6040
 
-# --- Hardware Configuration ---
-redColor = Pin(16, Pin.IN, Pin.PULL_UP)
-greenColor = Pin(17, Pin.IN, Pin.PULL_UP)
-blueColor = Pin(18, Pin.IN, Pin.PULL_UP)
-yellowColor = Pin(33, Pin.IN, Pin.PULL_UP)
-otherColor = Pin(34, Pin.IN)
+# =====================================================================
+# CONFIG - everything you should need to tune lives here
+# =====================================================================
 
-transistionBtn = Pin(35, Pin.IN)
+# --- Block detection (light sensor) ---
+LIGHT_THRESHOLD = 3000       # ADC reading BELOW this = block present
+LIGHT_SAMPLES = 4            # average this many ADC reads per check
+SETTLE_MS = 150              # wait for the block to stop moving before reading colour
 
-light_pin = Pin(25, Pin.IN)
-lightsensor = ADC(light_pin)
-lightsensor.atten(ADC.ATTN_11DB)  # Full scale ~0-3.3V
+# --- Colour sensor ---
+READS_PER_SAMPLE = 5         # average this many sensor reads per block
+SENSOR_INTEGRATION_MS = 40   # VEML6040 default integration time (40 ms)
+SATURATION = 65000           # 16-bit counts near this = sensor saturated
 
-np = neopixel.NeoPixel(Pin(15), 1)
-
-servoCatcher = PWM(Pin(4), freq=50, duty_u16=0)
-servoSorter = PWM(Pin(5), freq=50, duty_u16=0)
-
-
-def set_status_led(color):
-    """Sets status LED: 'red' = needs training, 'green' = ready/sorting."""
-    if color == "red":
-        np[0] = (50, 0, 0)
-    elif color == "green":
-        np[0] = (0, 50, 0)
-    else:
-        np[0] = (0, 0, 0)
-    np.write()
-
-
-set_status_led("red")
-
-# Initialize I2C & VEML6040 Color Sensor
-i2c = SoftI2C(scl=Pin(22), sda=Pin(21))
-sensor = veml6040.VEML6040(i2c)
-sensor.trigger_measurement()
-
-# --- Global States & Flags ---
-DEBOUNCE_MS = 200
-last_press_trans = 0
-last_press_color = 0
-
-STATE_TRAIN = True
-STATE_PLAY = False
-
-LIGHT_THRESHOLD = 3000
+# --- KNN ---
 MIN_SAMPLES_PER_COLOR = 5
+K = 3
+BRIGHTNESS_SCALE = 30000.0   # roughly the R+G+B total you see for a bright block
+BRIGHTNESS_WEIGHT = 0.5      # how much overall brightness matters vs. hue (0 = ignore)
 
-data = []  # Holds (R, G, B, label) tuples
+# --- Servos ---
+SERVO_MIN_US = 500           # pulse width at 0 deg   (try 1000 if your servo buzzes/jams)
+SERVO_MAX_US = 2500          # pulse width at 180 deg (try 2000 if your servo buzzes/jams)
 
-sample_counts = {
-    "red": 0,
-    "green": 0,
-    "blue": 0,
-    "yellow": 0,
-    "other/black": 0
-}
-
-button_flags = {
-    "transition": False,
-    "red": False,
-    "green": False,
-    "blue": False,
-    "yellow": False,
-    "other/black": False
-}
-
-color_angles = {
+BIN_ANGLES = {               # sorter servo angle for each bin - CALIBRATE THESE
     "red": 0,
     "green": 45,
     "blue": 90,
     "yellow": 135,
-    "other/black": 180
+    "other/black": 180,
 }
+SORTER_TRAVEL_MS = 600       # time for sorter to swing to position (was 300 - too short for 180 deg)
+CATCHER_HOLD_ANGLE = 180
+CATCHER_DROP_ANGLE = 0
+CATCHER_DROP_MS = 1000
+
+COLORS = ("red", "green", "blue", "yellow", "other/black")
+
+# =====================================================================
+# HARDWARE
+# =====================================================================
+
+# NOTE: GPIO 34 and 35 are INPUT-ONLY on the ESP32 and have NO internal
+# pull-up. They MUST have an external ~10k pull-up resistor to 3.3V or
+# they will float and fire random interrupts.
+buttons = {
+    "red":         Pin(16, Pin.IN, Pin.PULL_UP),
+    "green":       Pin(17, Pin.IN, Pin.PULL_UP),
+    "blue":        Pin(18, Pin.IN, Pin.PULL_UP),
+    "yellow":      Pin(33, Pin.IN, Pin.PULL_UP),
+    "other/black": Pin(34, Pin.IN),   # external pull-up required
+}
+transition_btn = Pin(35, Pin.IN)      # external pull-up required
+
+lightsensor = ADC(Pin(25, Pin.IN))
+lightsensor.atten(ADC.ATTN_11DB)
+
+np = neopixel.NeoPixel(Pin(15), 1)
+
+servo_catcher = PWM(Pin(4), freq=50, duty_u16=0)
+servo_sorter = PWM(Pin(5), freq=50, duty_u16=0)
+
+i2c = SoftI2C(scl=Pin(22), sda=Pin(21))
+sensor = veml6040.VEML6040(i2c)
+
+
+def set_status_led(color):
+    """'red' = still training, 'green' = enough data / sorting."""
+    np[0] = {"red": (50, 0, 0), "green": (0, 50, 0)}.get(color, (0, 0, 0))
+    np.write()
+
+
+def servo_write(servo, angle):
+    angle = max(0, min(180, angle))
+    us = SERVO_MIN_US + (SERVO_MAX_US - SERVO_MIN_US) * angle / 180.0
+    servo.duty_u16(int(us / 20000.0 * 65535))
+
+
+def init_servos():
+    servo_write(servo_catcher, CATCHER_HOLD_ANGLE)
+    servo_write(servo_sorter, BIN_ANGLES["red"])
+
+
+def sort_to_bin(color):
+    """Swing the sorter to the bin, then open and re-close the catcher."""
+    print("Sorter -> %s (%d deg)" % (color, BIN_ANGLES[color]))
+    servo_write(servo_sorter, BIN_ANGLES[color])
+    time.sleep_ms(SORTER_TRAVEL_MS)
+    servo_write(servo_catcher, CATCHER_DROP_ANGLE)
+    time.sleep_ms(CATCHER_DROP_MS)
+    servo_write(servo_catcher, CATCHER_HOLD_ANGLE)
+
+
+# =====================================================================
+# BUTTONS (interrupt driven, debounced)
+# =====================================================================
+DEBOUNCE_MS = 200
+_last_press = {name: 0 for name in COLORS}
+_last_press["transition"] = 0
+button_flags = {name: False for name in COLORS}
+button_flags["transition"] = False
+_pin_to_name = {id(pin): name for name, pin in buttons.items()}
+_pin_to_name[id(transition_btn)] = "transition"
 
 
 def clear_button_flags():
-    """Resets all button flags to False."""
-    for button in button_flags:
-        button_flags[button] = False
+    for k in button_flags:
+        button_flags[k] = False
 
 
-def button_handler(pin):
-    """Debounced IRQ handler with separate timing for transition vs colors."""
-    global last_press_trans, last_press_color
+def _button_irq(pin):
+    name = _pin_to_name.get(id(pin))
+    if name is None:
+        return
     now = time.ticks_ms()
-
-    if pin == transistionBtn:
-        if time.ticks_diff(now, last_press_trans) > DEBOUNCE_MS:
-            if pin.value() == 0:
-                button_flags["transition"] = True
-                last_press_trans = now
-    else:
-        if time.ticks_diff(now, last_press_color) > DEBOUNCE_MS:
-            if pin.value() == 0:
-                if pin == redColor:
-                    button_flags["red"] = True
-                elif pin == greenColor:
-                    button_flags["green"] = True
-                elif pin == blueColor:
-                    button_flags["blue"] = True
-                elif pin == yellowColor:
-                    button_flags["yellow"] = True
-                elif pin == otherColor:
-                    button_flags["other/black"] = True
-                last_press_color = now
+    if time.ticks_diff(now, _last_press[name]) > DEBOUNCE_MS and pin.value() == 0:
+        button_flags[name] = True
+        _last_press[name] = now
 
 
-# Attach IRQs
-redColor.irq(trigger=Pin.IRQ_FALLING, handler=button_handler)
-greenColor.irq(trigger=Pin.IRQ_FALLING, handler=button_handler)
-blueColor.irq(trigger=Pin.IRQ_FALLING, handler=button_handler)
-yellowColor.irq(trigger=Pin.IRQ_FALLING, handler=button_handler)
-otherColor.irq(trigger=Pin.IRQ_FALLING, handler=button_handler)
-transistionBtn.irq(trigger=Pin.IRQ_FALLING, handler=button_handler)
+for _p in buttons.values():
+    _p.irq(trigger=Pin.IRQ_FALLING, handler=_button_irq)
+transition_btn.irq(trigger=Pin.IRQ_FALLING, handler=_button_irq)
 
 
-def get_pressed_color():
-    """Waits until a color button IRQ sets a flag."""
+def wait_for_color_button():
+    """Block until a colour button is pressed. Returns None if the
+    transition button is pressed instead (= discard this sample)."""
     clear_button_flags()
-    selected_color = None
-    color_keys = ("red", "green", "blue", "yellow", "other/black")
-
-    while selected_color is None:
-        for color in color_keys:
+    while True:
+        for color in COLORS:
             if button_flags[color]:
-                selected_color = color
-                break
-        time.sleep(0.01)
-
-    clear_button_flags()
-    return selected_color
-
-
-def initilizeServos():
-    duty = int((2.5 / 20.0) * 65535)  # 180 deg
-    servoCatcher.duty_u16(duty)
-    duty = int((0.5 / 20.0) * 65535)  # 0 deg
-    servoSorter.duty_u16(duty)
+                clear_button_flags()
+                return color
+        if button_flags["transition"]:
+            clear_button_flags()
+            return None
+        time.sleep_ms(10)
 
 
-def sortColor(color):
-    """Moves sorter servo to destination angle and triggers catcher servo."""
-    pulse_ms = 0.5 + (color_angles[color] / 180.0) * 2.0
-    duty = int((pulse_ms / 20.0) * 65535)
-    servoSorter.duty_u16(duty)
-
-    time.sleep(0.3)  # Give sorter servo time to position
-
-    duty_release = int((0.5 / 20.0) * 65535)  # Drop position
-    servoCatcher.duty_u16(duty_release)
-    time.sleep(1.0)
-
-    duty_reset = int((2.5 / 20.0) * 65535)  # Reset position
-    servoCatcher.duty_u16(duty_reset)
+# =====================================================================
+# SENSORS
+# =====================================================================
+def light_level():
+    total = 0
+    for _ in range(LIGHT_SAMPLES):
+        total += lightsensor.read()
+    return total // LIGHT_SAMPLES
 
 
-def k_nearest_neighbor(x, y, z, k=3):
+def block_present():
+    return light_level() < LIGHT_THRESHOLD
+
+
+def read_color():
+    """Trigger a fresh measurement each time and average several reads."""
+    rs = gs = bs = ws = 0
+    for _ in range(READS_PER_SAMPLE):
+        sensor.trigger_measurement()
+        time.sleep_ms(SENSOR_INTEGRATION_MS + 10)
+        r, g, b, w = sensor.read_rgbw()
+        rs += r; gs += g; bs += b; ws += w
+    n = READS_PER_SAMPLE
+    r, g, b, w = rs / n, gs / n, bs / n, ws / n
+    if max(r, g, b, w) >= SATURATION:
+        print("[!] Sensor is SATURATED - lower the integration time or move the block further away")
+    return r, g, b, w
+
+
+# =====================================================================
+# KNN
+# =====================================================================
+data = []  # list of (features_tuple, label)
+sample_counts = {c: 0 for c in COLORS}
+
+
+def features(r, g, b, w):
+    """Convert raw counts to a distance-friendly feature vector.
+
+    Raw RGB counts are dominated by how BRIGHT the reading is (block
+    distance, ambient light), not what colour it is. Normalising by the
+    total gives a 'chromaticity' that describes the hue only, and we add
+    a small scaled brightness term so black/dark blocks are still separable.
+    """
+    s = r + g + b
+    if s <= 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    bright = min(s / BRIGHTNESS_SCALE, 1.0) * BRIGHTNESS_WEIGHT
+    return (r / s, g / s, b / s, bright)
+
+
+def knn(feat, k=K, verbose=True):
     if not data:
-        return "No Data"
-    distances = []
-    for d in data:
-        dist = math.sqrt((x - d[0])**2 + (y - d[1])**2 + (z - d[2])**2)
-        distances.append([dist, d[3]])
-    distances.sort()
-    k_neighbors = distances[:min(k, len(distances))]
-    classes = [dist[1] for dist in k_neighbors]
-    return max(set(classes), key=classes.count)
+        return None
+    neighbors = []
+    for f, label in data:
+        d = math.sqrt(sum((a - b) ** 2 for a, b in zip(feat, f)))
+        neighbors.append((d, label))
+    neighbors.sort(key=lambda t: t[0])
+    neighbors = neighbors[:min(k, len(neighbors))]
+
+    # Distance-weighted vote: closer neighbours count more, and it breaks ties.
+    votes = {}
+    for d, label in neighbors:
+        votes[label] = votes.get(label, 0.0) + 1.0 / (d + 1e-6)
+    winner = max(votes, key=votes.get)
+
+    if verbose:
+        print("  nearest:", ["%s (%.3f)" % (l, d) for d, l in neighbors])
+    return winner
 
 
-def check_training_status():
-    """Returns True if every color has AT LEAST the required sample count."""
-    for count in sample_counts.values():
-        if count < MIN_SAMPLES_PER_COLOR:
-            return False
-    return True
+def training_complete():
+    return all(sample_counts[c] >= MIN_SAMPLES_PER_COLOR for c in COLORS)
 
 
-def trigger_color_read():
-    global STATE_TRAIN, STATE_PLAY
-    colorLabel = None
+def print_progress():
+    print("--- Progress ---")
+    for c in COLORS:
+        print("  %-12s %d/%d" % (c.upper(), sample_counts[c], MIN_SAMPLES_PER_COLOR))
 
-    if lightsensor.read() >= LIGHT_THRESHOLD:
+
+# =====================================================================
+# MODES
+# =====================================================================
+MODE_TRAIN = "train"
+MODE_SORT = "sort"
+mode = MODE_TRAIN
+
+
+def handle_transition():
+    """Called whenever the transition button flag is set."""
+    global mode
+    button_flags["transition"] = False
+    if mode == MODE_TRAIN:
+        if training_complete():
+            mode = MODE_SORT
+            set_status_led("green")
+            print("\n" + "=" * 50)
+            print("*** SORTING MODE ***")
+            print("=" * 50)
+        else:
+            print("[!] Need at least %d samples per colour first." % MIN_SAMPLES_PER_COLOR)
+            print_progress()
+    else:
+        mode = MODE_TRAIN
+        set_status_led("green" if training_complete() else "red")
+        print("\n*** Back to TRAINING mode (adding more samples) ***")
+
+
+def process_block():
+    print("\n--- Block detected ---")
+    time.sleep_ms(SETTLE_MS)
+    if not block_present():
+        print("(false trigger, block gone)")
         return
 
-    print("\n--- Block Detected! Reading Color Sensor ---")
-    red, green, blue, white = sensor.read_rgbw()
-    print(f"Raw RGB Read: R={red}, G={green}, B={blue}")
+    r, g, b, w = read_color()
+    feat = features(r, g, b, w)
+    print("Raw: R=%d G=%d B=%d W=%d   norm: r=%.3f g=%.3f b=%.3f" %
+          (r, g, b, w, feat[0], feat[1], feat[2]))
 
-    # --- TRAINING MODE ---
-    if STATE_TRAIN:
-        print(">>> Waiting for color button press (Red, Green, Blue, Yellow, Other)...")
-        colorLabel = get_pressed_color()
-
-        data.append((red, green, blue, colorLabel))
-        sample_counts[colorLabel] += 1
-        print(f"SUCCESS: Logged [{colorLabel}] sample (Total: {sample_counts[colorLabel]})")
-
-        print("--- Progress Summary ---")
-        for c, count in sample_counts.items():
-            print(f"  {c.upper()}: {count}/{MIN_SAMPLES_PER_COLOR} minimum")
-
-        if check_training_status():
+    if mode == MODE_TRAIN:
+        # Show what the model would currently guess - useful sanity check.
+        guess = knn(feat, verbose=False)
+        if guess:
+            print("(model currently thinks: %s)" % guess)
+        print(">>> Press the colour button for this block (transition button = discard)")
+        label = wait_for_color_button()
+        if label is None:
+            print("Sample discarded.")
+            return
+        data.append((feat, label))
+        sample_counts[label] += 1
+        print("Logged [%s] (%d total)" % (label, sample_counts[label]))
+        print_progress()
+        if training_complete():
             set_status_led("green")
-            print("\n" + "="*50)
-            print("READY TO GO INTO SORTING MODE")
-            print("Press Pin 35 to transition, or keep scanning to add more training samples.")
-            print("="*50)
-        else:
-            set_status_led("red")
+            print("READY - press transition button to start sorting, or keep training.")
+    else:
+        label = knn(feat)
+        print(">>> SORTED AS: [%s]" % label)
 
-    # --- PLAY MODE ---
-    elif STATE_PLAY:
-        colorLabel = k_nearest_neighbor(red, green, blue, k=3)
-        print(f">>> SORTING RESULT: Block is [{colorLabel}] <<<")
-
-    # --- EXECUTE SERVO MOVE IN BOTH MODES ---
-    if colorLabel and colorLabel != "No Data":
-        sortColor(colorLabel)
+    if label:
+        sort_to_bin(label)
 
 
-# --- Main Program Execution Loop ---
-print("System booted into TRAINING mode.")
-print(f"Collect at least {MIN_SAMPLES_PER_COLOR} samples for each color.")
-initilizeServos()
+# =====================================================================
+# MAIN
+# =====================================================================
+set_status_led("red")
+init_servos()
+
+print("Booted into TRAINING mode. Need %d samples per colour." % MIN_SAMPLES_PER_COLOR)
+print_progress()
 
 while True:
-    # Check transition button state
     if button_flags["transition"]:
-        button_flags["transition"] = False
-        if STATE_TRAIN:
-            if check_training_status():
-                STATE_TRAIN = False
-                STATE_PLAY = True
-                set_status_led("green")
-                print("\n" + "="*50)
-                print("*** TRANSITIONING TO SORTING MODE ***")
-                print("System is now ready to auto-classify blocks.")
-                print("="*50)
-            else:
-                print(f"\n[!] CANNOT TRANSITION: You need at least {MIN_SAMPLES_PER_COLOR} samples per color class first.")
+        handle_transition()
 
-    # Trigger scan when light threshold is crossed
-    if lightsensor.read() < LIGHT_THRESHOLD:
-        trigger_color_read()
-
-        # Wait until block clears, but check for transition requests in the background
-        while lightsensor.read() < LIGHT_THRESHOLD:
+    if block_present():
+        process_block()
+        # wait for the block to clear, still honouring the transition button
+        while block_present():
             if button_flags["transition"]:
-                button_flags["transition"] = False
-                if STATE_TRAIN and check_training_status():
-                    STATE_TRAIN = False
-                    STATE_PLAY = True
-                    set_status_led("green")
-                    print("\n" + "="*50)
-                    print("*** TRANSITIONING TO SORTING MODE ***")
-                    print("="*50)
-            time.sleep(0.05)
+                handle_transition()
+            time.sleep_ms(50)
 
-    time.sleep(0.05)
+    time.sleep_ms(50)
