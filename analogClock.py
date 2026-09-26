@@ -186,7 +186,10 @@ def setClock(hour, minute):
         
 # State variables
 state = 0  # 0 = clock, 1 = sunrise, 2 = sunset
-times_dict = {["sunrise": None, None], "sunset": [None, None]}
+times_dict = {
+    "sunrise": [None, None],
+    "sunset": [None, None]
+}
 
 # Hardware peripherals 
 btn = Pin(35, Pin.IN)
