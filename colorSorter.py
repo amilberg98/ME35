@@ -178,9 +178,9 @@ def extract_features(raw_rgbw):
     total_color = r + g + b + 1e-6  # prevent division by zero
     
     # Calculate what percentage of the light is red, green, and blue
-    norm_r = r / total_color
-    norm_g = g / total_color
-    norm_b = b / total_color
+    norm_r = r / w
+    norm_g = g / w
+    norm_b = b / w
     
     # Only return the ratios. We drop W completely.
     return (norm_r, norm_g, norm_b)
