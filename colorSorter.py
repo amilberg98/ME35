@@ -9,33 +9,31 @@ import veml6040
 # =====================================================================
 
 # --- Block detection (light sensor) ---
-LIGHT_THRESHOLD = 3000       # ADC reading BELOW this = block present
-LIGHT_SAMPLES = 4            # average this many ADC reads per check
-SETTLE_MS = 150              # wait for the block to stop moving before reading colour
+LIGHT_THRESHOLD = 3000        # ADC reading BELOW this = block present
+LIGHT_SAMPLES = 4             # average this many ADC reads per check
+SETTLE_MS = 150               # wait for the block to stop moving before reading colour
 
 # --- Colour sensor ---
-READS_PER_SAMPLE = 5         # average this many sensor reads per block
-SENSOR_INTEGRATION_MS = 40   # VEML6040 default integration time (40 ms)
-SATURATION = 65000           # 16-bit counts near this = sensor saturated
+READS_PER_SAMPLE = 5          # average this many sensor reads per block
+SENSOR_INTEGRATION_MS = 40    # VEML6040 default integration time (40 ms)
+SATURATION = 65000            # 16-bit counts near this = sensor saturated
 
 # --- KNN ---
 MIN_SAMPLES_PER_COLOR = 5
-K = 3
-BRIGHTNESS_SCALE = 30000.0   # roughly the R+G+B total you see for a bright block
-BRIGHTNESS_WEIGHT = 0.5      # how much overall brightness matters vs. hue (0 = ignore)
+K = 5
 
 # --- Servos ---
-SERVO_MIN_US = 500           # pulse width at 0 deg   (try 1000 if your servo buzzes/jams)
-SERVO_MAX_US = 2500          # pulse width at 180 deg (try 2000 if your servo buzzes/jams)
+SERVO_MIN_US = 500            # pulse width at 0 deg   (try 1000 if your servo buzzes/jams)
+SERVO_MAX_US = 2500           # pulse width at 180 deg (try 2000 if your servo buzzes/jams)
 
-BIN_ANGLES = {               # sorter servo angle for each bin - CALIBRATE THESE
+BIN_ANGLES = {                # sorter servo angle for each bin - CALIBRATE THESE
     "red": 0,
     "green": 45,
     "blue": 90,
     "yellow": 135,
     "other/black": 180,
 }
-SORTER_TRAVEL_MS = 600       # time for sorter to swing to position (was 300 - too short for 180 deg)
+SORTER_TRAVEL_MS = 600        
 CATCHER_HOLD_ANGLE = 180
 CATCHER_DROP_ANGLE = 0
 CATCHER_DROP_MS = 1000
@@ -46,9 +44,6 @@ COLORS = ("red", "green", "blue", "yellow", "other/black")
 # HARDWARE
 # =====================================================================
 
-# NOTE: GPIO 34 and 35 are INPUT-ONLY on the ESP32 and have NO internal
-# pull-up. They MUST have an external ~10k pull-up resistor to 3.3V or
-# they will float and fire random interrupts.
 buttons = {
     "red":         Pin(16, Pin.IN, Pin.PULL_UP),
     "green":       Pin(17, Pin.IN, Pin.PULL_UP),
@@ -147,7 +142,7 @@ def wait_for_color_button():
 
 
 # =====================================================================
-# SENSORS
+# SENSORS & FEATURE EXTRACTION
 # =====================================================================
 def light_level():
     total = 0
@@ -175,46 +170,48 @@ def read_color():
     return r, g, b, w
 
 
+def extract_features(raw_rgbw):
+    """Converts raw counts to pure RGB ratios, ignoring overall brightness (W)."""
+    r, g, b, w = raw_rgbw
+    
+    # Get the total amount of colored light
+    total_color = r + g + b + 1e-6  # prevent division by zero
+    
+    # Calculate what percentage of the light is red, green, and blue
+    norm_r = r / total_color
+    norm_g = g / total_color
+    norm_b = b / total_color
+    
+    # Only return the ratios. We drop W completely.
+    return (norm_r, norm_g, norm_b)
+
+
 # =====================================================================
 # KNN
 # =====================================================================
-data = []  # list of (features_tuple, label)
+data = []  # list of (feature_tuple, label)
 sample_counts = {c: 0 for c in COLORS}
 
 
-def features(r, g, b, w):
-    """Convert raw counts to a distance-friendly feature vector.
-
-    Raw RGB counts are dominated by how BRIGHT the reading is (block
-    distance, ambient light), not what colour it is. Normalising by the
-    total gives a 'chromaticity' that describes the hue only, and we add
-    a small scaled brightness term so black/dark blocks are still separable.
-    """
-    s = r + g + b
-    if s <= 0:
-        return (0.0, 0.0, 0.0, 0.0)
-    bright = min(s / BRIGHTNESS_SCALE, 1.0) * BRIGHTNESS_WEIGHT
-    return (r / s, g / s, b / s, bright)
-
-
-def knn(feat, k=K, verbose=True):
+def knn(features, k=K, verbose=True):
     if not data:
         return None
     neighbors = []
-    for f, label in data:
-        d = math.sqrt(sum((a - b) ** 2 for a, b in zip(feat, f)))
+    for sample_feat, label in data:
+        # Euclidean distance in raw feature space
+        d = math.sqrt(sum((a - b) ** 2 for a, b in zip(features, sample_feat)))
         neighbors.append((d, label))
     neighbors.sort(key=lambda t: t[0])
     neighbors = neighbors[:min(k, len(neighbors))]
 
-    # Distance-weighted vote: closer neighbours count more, and it breaks ties.
+    # Distance-weighted vote
     votes = {}
     for d, label in neighbors:
         votes[label] = votes.get(label, 0.0) + 1.0 / (d + 1e-6)
     winner = max(votes, key=votes.get)
 
     if verbose:
-        print("  nearest:", ["%s (%.3f)" % (l, d) for d, l in neighbors])
+        print("   nearest:", ["%s (%.1f)" % (l, d) for d, l in neighbors])
     return winner
 
 
@@ -258,20 +255,21 @@ def handle_transition():
 
 def process_block():
     sensorLight.off()
+    time.sleep(1)
     print("\n--- Block detected ---")
     time.sleep_ms(SETTLE_MS)
     if not block_present():
         print("(false trigger, block gone)")
         return
 
-    r, g, b, w = read_color()
-    feat = features(r, g, b, w)
-    print("Raw: R=%d G=%d B=%d W=%d   norm: r=%.3f g=%.3f b=%.3f" %
-          (r, g, b, w, feat[0], feat[1], feat[2]))
+    raw_rgbw = read_color()
+    features = extract_features(raw_rgbw)
+    
+    print("Raw (R, G, B, W): (%d, %d, %d, %d)" % raw_rgbw)
+    print("Normalized Features: (%.2f, %.2f, %.2f)" % features)
 
     if mode == MODE_TRAIN:
-        # Show what the model would currently guess - useful sanity check.
-        guess = knn(feat, verbose=False)
+        guess = knn(features, verbose=False)
         if guess:
             print("(model currently thinks: %s)" % guess)
         print(">>> Press the colour button for this block (transition button = discard)")
@@ -279,7 +277,7 @@ def process_block():
         if label is None:
             print("Sample discarded.")
             return
-        data.append((feat, label))
+        data.append((features, label))
         sample_counts[label] += 1
         print("Logged [%s] (%d total)" % (label, sample_counts[label]))
         print_progress()
@@ -287,13 +285,14 @@ def process_block():
             set_status_led("green")
             print("READY - press transition button to start sorting, or keep training.")
     else:
-        label = knn(feat)
+        label = knn(features)
         print(">>> SORTED AS: [%s]" % label)
 
     if label:
         sort_to_bin(label)
         
     sensorLight.on()
+
 
 # =====================================================================
 # MAIN
@@ -309,9 +308,7 @@ while True:
         handle_transition()
 
     if block_present():
-        
         process_block()
-        # wait for the block to clear, still honouring the transition button
         while block_present():
             if button_flags["transition"]:
                 handle_transition()
