@@ -12,7 +12,7 @@ import uasyncio as asyncio
 # -------------------------------------------------------------------------
 # Robot Set Up & Calibration
 # -------------------------------------------------------------------------
-L1, L2 = 9.3, 10.16  # Link lengths in cm
+L1, L2 = 9, 10.16  # Link lengths in cm
 
 s1 = PWM(Pin(4), freq=50)
 s2 = PWM(Pin(18), freq=50)
@@ -29,14 +29,10 @@ def servo(pwm, deg):
 
 def calculate_inverse_kinematics(x, y, l1=L1, l2=L2):
     """Calculates absolute physical servo angles (0 to 180 deg) for Quadrant 1."""
-    x = max(0.5, x)
-    y = max(0.5, y)
 
     r_sq = x**2 + y**2
     r = math.sqrt(r_sq)
 
-    # Singularity prevention: Max total reach is L1 + L2 = 19.46 cm.
-    # Cap slightly below physical max reach (16.5 cm) to avoid elbow lockup
     max_reach = 16.5
     min_reach = 1.0
     if r > max_reach:
@@ -48,12 +44,10 @@ def calculate_inverse_kinematics(x, y, l1=L1, l2=L2):
         y = y * (min_reach / r)
         r_sq = x**2 + y**2
 
-    # Law of Cosines for interior elbow angle (alpha)
     cos_alpha = (l1**2 + l2**2 - r_sq) / (2 * l1 * l2)
     cos_alpha = max(-1.0, min(1.0, cos_alpha))
     alpha = math.acos(cos_alpha)
 
-    # Calculate shoulder base angle (theta1)
     gamma = math.atan2(y, x)
     cos_beta = (l1**2 + r_sq - l2**2) / (2 * l1 * r)
     cos_beta = max(-1.0, min(1.0, cos_beta))
@@ -68,13 +62,13 @@ def calculate_inverse_kinematics(x, y, l1=L1, l2=L2):
     return s1_deg, s2_deg
 
 
-box_side = (L1 + L2) / 1.414
-cx, cy = box_side / 2, box_side / 2
+box_side = (L1 + L2) / 1.414  # ~13.55 cm
+cx, cy = box_side / 2, box_side / 2  # ~6.77 cm
 
 # Set home position to safe workspace center
 deg1_home, deg2_home = calculate_inverse_kinematics(cx, cy)
-servo(s1, deg1_home)
-servo(s2, deg2_home)
+servo(s1, 90)
+servo(s2, 90)
 
 
 # -------------------------------------------------------------------------
@@ -86,18 +80,17 @@ def linspace(start, stop, num):
     step = (stop - start) / (num - 1)
     return [start + i * step for i in range(num)]
 
-
 def generate_shape_points(shape_type, num_points):
-    t_vals = linspace(0.0, 2.0 * math.pi, num_points)
+    x, y = [], []
 
     if shape_type == "Circle":
-        # Full box diameter circle centered at (cx, cy)
         radius = box_side / 2.0
+        t_vals = linspace(0.0, 2.0 * math.pi, num_points)
         x = [cx + radius * math.cos(t) for t in t_vals]
         y = [cy + radius * math.sin(t) for t in t_vals]
 
     elif shape_type == "Square":
-        side = box_side
+        side = box_side * 0.7
         x0, y0 = 0.0, 0.0
         pts_per_side = num_points // 4
         s_x = linspace(x0, x0 + side, pts_per_side)
@@ -109,8 +102,7 @@ def generate_shape_points(shape_type, num_points):
         y = [y0] * pts_per_side + s_y + [y0 + side] * pts_per_side + s_y_rev
 
     elif shape_type == "Star":
-        x, y = [], []
-        # Outer tip extends to full box boundary (r = box_side / 2)
+        t_vals = linspace(0.0, 2.0 * math.pi, num_points)
         r_outer = box_side / 2.0
         r_inner = r_outer * 0.4
         r_mid = (r_outer + r_inner) / 2.0
@@ -121,27 +113,39 @@ def generate_shape_points(shape_type, num_points):
             y.append(cy + r * math.sin(t))
 
     elif shape_type == "Heart":
-        x, y = [], []
-        # Scaled to fill the full box_side width and height
-        scale_x = box_side / 32.0  # Horizontal range (-16 to +16 = 32)
-        scale_y = box_side / 28.0  # Vertical range (~28)
+        t_vals = linspace(0.0, 2.0 * math.pi, num_points)
+        scale = box_side / 30.0
         for t in t_vals:
-            x.append(cx + scale_x * (16.0 * (math.sin(t) ** 3)))
-            y.append(
-                cy
-                + scale_y
-                * (
-                    13.0 * math.cos(t)
-                    - 5.0 * math.cos(2.0 * t)
-                    - 2.0 * math.cos(3.0 * t)
-                    - math.cos(4.0 * t)
-                )
-            )
+            hx = 16.0 * (math.sin(t) ** 3)
+            hy = (13.0 * math.cos(t) - 5.0 * math.cos(2.0 * t) - 
+                  2.0 * math.cos(3.0 * t) - math.cos(4.0 * t))
+            x.append(cx + hx * scale)
+            y.append(cy - hy * scale)
     else:
         x, y = [cx], [cy]
 
-    return x, y
+    if shape_type in ["Circle", "Square", "Star", "Heart"] and x and y:
+        # Force exact loop closure
+        x[-1] = x[0]
+        y[-1] = y[0]
 
+        # -------------------------------------------------------------
+        # Orientation Correction (Flips upside down)
+        # -------------------------------------------------------------
+        trans_x, trans_y = [], []
+        for px, py in zip(x, y):
+            dx = px - cx
+            dy = py - cy
+            
+            dy = -dy  # Flip vertically so shapes render right-side up
+            
+            trans_x.append(cx + dx)
+            trans_y.append(cy + dy)
+            
+        x, y = trans_x, trans_y
+
+    return x, y
+ 
 
 # -------------------------------------------------------------------------
 # Asynchronous Drawing Task
@@ -163,7 +167,7 @@ async def draw_shape_async(shape_name):
                 deg1, deg2 = calculate_inverse_kinematics(x, y)
                 servo(s1, deg1)
                 servo(s2, deg2)
-                await asyncio.sleep_ms(25)
+                await asyncio.sleep_ms(20)
     finally:
         is_drawing = False
         print(f"Finished drawing: {shape_name}")
