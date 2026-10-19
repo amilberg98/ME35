@@ -28,7 +28,7 @@ def servo(pwm, deg):
 # -------------------------------------------------------------------------
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
-wlan.connect("Tufts_Wireless", "")
+wlan.connect(secrets.SSID, secrets.PASSWORD)
 
 print("Connecting to Wi-Fi...", end="")
 while not wlan.isconnected():
@@ -37,10 +37,9 @@ while not wlan.isconnected():
 print("\nConnected! IP Address:", wlan.ifconfig()[0])
 
 def fetch_mate_values():
-    # Replace these with your document ID, workspace ID, and assembly element ID
     did = "10bd01c903cddb31dd80fc2b"
-    wid = "1684fb46d8931cf553d280c9"  # Found in your browser URL after /w/
-    eid = "41de52599c79b9656e3d6c3f"  # Found in your browser URL after /e/
+    wid = "1684fb46d8931cf553d280c9"  
+    eid = "41de52599c79b9656e3d6c3f"  
     
     api_url = f"https://cad.onshape.com/api/assemblies/d/{did}/w/{wid}/e/{eid}/matevalues"
 
@@ -59,7 +58,6 @@ def fetch_mate_values():
 
     if response.status_code == 200:
         data = response.json()
-        # Example of iterating through the returned mates
         for mate in data.get("mateValues", []):
             angle = mate.get('rotationZ')
             if angle is not None:
