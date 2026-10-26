@@ -138,11 +138,11 @@ buzzer.duty(0)  # Ensure it starts off
 
 # Servo to Pin D4, 50Hz PWM, 20 ms duty cycle
 servo = PWM(Pin(5), freq=50, duty_u16=0)
-servo_angle(100)
+servo_angle(80)
 
 # Setup a hardware timer (Timer 0) AFTER variables are initialized
 display_timer = Timer(0)
-display_timer.init(period=8, mode=Timer.PERIODIC, callback=multiplex_callback)
+display_timer.init(period=3, mode=Timer.PERIODIC, callback=multiplex_callback)
 
 
 # ==========================================
@@ -234,13 +234,13 @@ while True:
         failure_sound()
         servo_angle(0)
         time.sleep_ms(400)
-        servo_angle(100)
+        servo_angle(80)
         STATE = 0
     elif STATE == 3:  # Finished Studying
         success_sound()
         servo_angle(0)
         time.sleep_ms(400)
-        servo_angle(100)
+        servo_angle(80)
         STATE = 0
     else:
         STATE = 0
