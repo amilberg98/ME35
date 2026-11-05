@@ -1,6 +1,5 @@
 from machine import Pin, SoftI2C
 import time
-import veml6040  # Import driver module
 import lis3dh
 import math
 
